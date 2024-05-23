@@ -20,6 +20,12 @@ const (
 	MsgHeaderSize              = Uint24(20)
 )
 
+const (
+	CapabilitiesExchangeCode = 257
+	DeviceWatchdogCode       = 280
+	DisconnectPeerCode       = 282
+)
+
 // Message represents a single Diameter message
 type Message struct {
 	Version    uint8
@@ -42,6 +48,23 @@ func (m *Message) FindFirstAVPByCode(code Uint24) *AVP {
 	}
 
 	return nil
+}
+
+// MapOfAvpsByCode creates a map of the AVPs by AVP code, providing a list of
+// all AVPs matching that code.  Each call to this method regenerates the map
+// (i.e., the conversion is not cached).
+func (m *Message) MapOfAvpsByCode() map[uint32][]*AVP {
+	avpMap := make(map[uint32][]*AVP)
+
+	for _, avp := range m.Avps {
+		if v, codeIsInMap := avpMap[avp.Code]; codeIsInMap {
+			v = append(v, avp)
+		} else {
+			avpMap[avp.Code] = []*AVP{avp}
+		}
+	}
+
+	return avpMap
 }
 
 // IsRequest returns true if the message is a Diameter Request message (that
@@ -229,10 +252,18 @@ func (m *Message) Equals(c *Message) bool {
 func (m *Message) BecomeAnAnswerBasedOnTheRequestMessage(request *Message) *Message {
 	m.EndToEndID = request.EndToEndID
 	m.HopByHopID = request.HopByHopID
+	m.AppID = request.AppID
 	m.Code = request.Code
 	m.Flags &^= MsgFlagRequest
 
 	return m
+}
+
+// GenerateMatchingResponseWithAvps duplicates the end-to-end-id, hop-by-hop-id, code
+// and flags from the message, but clearing the request flag.  The newly generated message
+// will contain the provided AVPs.
+func (m *Message) GenerateMatchingResponseWithAvps(mandatoryAvps []*AVP, optionalAvps []*AVP) *Message {
+	return NewMessage(m.Flags&^MsgFlagRequest, m.Code, m.AppID, m.HopByHopID, m.EndToEndID, mandatoryAvps, optionalAvps)
 }
 
 const (

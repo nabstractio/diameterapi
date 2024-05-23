@@ -38,7 +38,7 @@ AvpTypes:
       Code: 85
       Vendor-Id: 0
       Type: Unsigned32
-    - Name: "Host-IP-AddressInband-Security"
+    - Name: "Host-IP-Address"
       Code: 257
       Vendor-Id: 0
       Type: Address
@@ -296,7 +296,7 @@ AvpTypes:
       Code: 298
       Vendor-Id: 0
       Type: Unsigned32
-    - Name: "-Id"
+    - Name: "Inband-Security-Id"
       Code: 299
       Vendor-Id: 0
       Type: Unsigned32

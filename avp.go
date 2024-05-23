@@ -498,6 +498,16 @@ func ConvertAVPDataToTypedData(avpData []byte, dataType AVPDataType) (interface{
 	}
 }
 
+// MustConvertAVPDataToTypedData does the same thing as ConvertAVPDataToTypedData but panics
+// if there is an error.
+func MustConvertAVPDataToTypedData(avpData []byte, dataType AVPDataType) interface{} {
+	v, err := ConvertAVPDataToTypedData(avpData, dataType)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 // MakeProtected sets avp.Protected to true and returns the AVP reference.  It is so rare for
 // this flag to be set, this provides a convenient method to set the value inline after
 // AVP creation
