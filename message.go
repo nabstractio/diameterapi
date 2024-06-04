@@ -13,6 +13,7 @@ type Uint24 uint32
 
 // Possible flag values for a Diameter message
 const (
+	MsgFlagNone                = 0x00
 	MsgFlagRequest             = 0x80
 	MsgFlagProxiable           = 0x40
 	MsgFlagError               = 0x20
@@ -20,57 +21,91 @@ const (
 	MsgHeaderSize              = Uint24(20)
 )
 
-const (
-	CapabilitiesExchangeCode = 257
-	DeviceWatchdogCode       = 280
-	DisconnectPeerCode       = 282
-)
+// MessageExtendedAttributes includes extended Message attributes that can be
+// provided by, for example, a dictionary.  It includes a human-friendly name
+// and an abbreviated name.
+type MessageExtendedAttributes struct {
+	Name            string
+	AbbreviatedName string
+}
 
 // Message represents a single Diameter message
 type Message struct {
-	Version    uint8
-	Length     Uint24
-	Flags      uint8
-	Code       Uint24
-	AppID      uint32
-	HopByHopID uint32
-	EndToEndID uint32
-	Avps       []*AVP
+	Version            uint8
+	Length             Uint24
+	Flags              uint8
+	Code               Uint24
+	AppID              uint32
+	HopByHopID         uint32
+	EndToEndID         uint32
+	Avps               []*AVP
+	ExtendedAttributes *MessageExtendedAttributes
+
+	mapOfAvpsByVendorAndCode map[AvpVendorIdAndCode][]*AVP
 }
 
-// FindFirstAVPByCode returns the first instance of the identified AVP associated
+// FirstAvpMatching returns the first instance of the identified AVP associated
 // with the current Message, or nil if the Message has no instances of the AVP
-func (m *Message) FindFirstAVPByCode(code Uint24) *AVP {
-	for _, avp := range m.Avps {
-		if avp.Code == uint32(code) {
-			return avp
-		}
+func (m *Message) FirstAvpMatching(vendorId uint32, code Uint24) *AVP {
+	if m.mapOfAvpsByVendorAndCode == nil {
+		m.mapOfAvpsByVendorAndCode = GenerateMapOfAvpsByVendorAndCode(m.Avps)
 	}
 
-	return nil
+	if avpSet := m.mapOfAvpsByVendorAndCode[AvpVendorIdAndCode{vendorId, uint32(code)}]; len(avpSet) == 0 {
+		return nil
+	} else {
+		return avpSet[0]
+	}
 }
 
 // MapOfAvpsByCode creates a map of the AVPs by AVP code, providing a list of
 // all AVPs matching that code.  Each call to this method regenerates the map
 // (i.e., the conversion is not cached).
-func (m *Message) MapOfAvpsByCode() map[uint32][]*AVP {
-	avpMap := make(map[uint32][]*AVP)
+func (m *Message) MapOfAvpsByCode() map[AvpVendorIdAndCode][]*AVP {
+	// don't use internal mapOfAvpsByVendorAndCode so that caller doesn't modify that
+	// internal structure
+	return GenerateMapOfAvpsByVendorAndCode(m.Avps)
+}
 
-	for _, avp := range m.Avps {
-		if v, codeIsInMap := avpMap[avp.Code]; codeIsInMap {
-			v = append(v, avp)
-		} else {
-			avpMap[avp.Code] = []*AVP{avp}
-		}
+// TopLevelAvpsMatching returns the set of top-level AVPs in the message that match
+// the provided vendorId and code.  "top-level" here means AVPs that are not part of
+// a Grouped AVP contained within the message.
+func (m *Message) TopLevelAvpsMatching(vendorId uint32, code Uint24) []*AVP {
+	if m.mapOfAvpsByVendorAndCode == nil {
+		m.mapOfAvpsByVendorAndCode = GenerateMapOfAvpsByVendorAndCode(m.Avps)
 	}
 
-	return avpMap
+	return m.mapOfAvpsByVendorAndCode[AvpVendorIdAndCode{vendorId, uint32(code)}]
+}
+
+// HasATopLevelAvpMatching returns true if there is at least one top-level AVP in the message
+// that has matching vendorId and code.
+func (m *Message) HasATopLevelAvpMatching(vendorId uint32, code Uint24) bool {
+	return len(m.TopLevelAvpsMatching(vendorId, code)) > 0
+}
+
+// DoesNotHaveATopLevelAvpMatching is the opposite of HasATopLevelAvpMatching(), provided
+// to enhance conditional statement natural readability.
+func (m *Message) DoesNotHaveATopLevelAvpMatching(vendorId uint32, code Uint24) bool {
+	return len(m.TopLevelAvpsMatching(vendorId, code)) == 0
+}
+
+// NumberOfTopLevelAvpsMatching returns the count of top-level AVPs in the message that
+// have the matching vendorId and code.
+func (m *Message) NumberOfTopLevelAvpsMatching(vendorId uint32, code Uint24) int {
+	return len(m.TopLevelAvpsMatching(vendorId, code))
 }
 
 // IsRequest returns true if the message is a Diameter Request message (that
 // is, the request flag in the Diameter message header is set)
 func (m *Message) IsRequest() bool {
 	return (m.Flags & MsgFlagRequest) != 0
+}
+
+// IsAnswer returns true if the message is a Diameter Answer message (that is,
+// the request flag in the Diameter message header is not set)
+func (m *Message) IsAnswer() bool {
+	return !m.IsRequest()
 }
 
 // IsProxiable returns true if the proxiable flag in the Diameter message header is set
@@ -125,7 +160,7 @@ func DecodeMessage(input []byte) (*Message, error) {
 	m.Length = Uint24(flagsAndLength & 0x00FFFFFF)
 
 	if Uint24(len(input)) < m.Length {
-		return nil, errors.New("Header length does not match stream length")
+		return nil, errors.New("header length does not match stream length")
 	}
 
 	err = binary.Read(buf, binary.BigEndian, &flagsAndLength)
@@ -206,7 +241,7 @@ func NewMessage(flags uint8, code Uint24, appID uint32, hopByHopID uint32, endTo
 // against changes to the message being cloned.  All AVPs in this message are also
 // cloned.
 func (m *Message) Clone() *Message {
-	clonedAvps := make([]*AVP, len(m.Clone().Avps))
+	clonedAvps := make([]*AVP, len(m.Avps))
 	for _, srcAvp := range m.Avps {
 		clonedAvps = append(clonedAvps, srcAvp.Clone())
 	}
@@ -351,7 +386,7 @@ func extractNextMessageInByteBufferIfThereIsOne(incoming []byte) (*Message, []by
 		if err != nil {
 			return nil, incoming, err
 		} else if version != 1 {
-			return nil, incoming, errors.New("Unknown Diameter version")
+			return nil, incoming, errors.New("unknown Diameter version")
 		} else {
 			return nil, incoming, nil
 		}
@@ -367,7 +402,7 @@ func extractNextMessageInByteBufferIfThereIsOne(incoming []byte) (*Message, []by
 		length := Uint24(flagsAndLength & 0x00FFFFFF)
 
 		if version != 1 {
-			return nil, incoming, errors.New("Invalid Diameter message version")
+			return nil, incoming, errors.New("invalid Diameter message version")
 		}
 
 		if len(incoming) < int(length) {
@@ -398,8 +433,8 @@ type MessageStreamReader struct {
 func NewMessageStreamReader(usingReader io.Reader) *MessageStreamReader {
 	return &MessageStreamReader{
 		underlyingReader:   usingReader,
-		internalByteBuffer: make([]byte, 18000),
-		readBuffer:         make([]byte, 9000),
+		internalByteBuffer: make([]byte, 0, 16384),
+		readBuffer:         make([]byte, 9100),
 	}
 }
 
@@ -438,12 +473,12 @@ func (reader *MessageStreamReader) ReadOnce() (*Message, error) {
 		return message, nil
 	}
 
-	bytesRead, err := reader.underlyingReader.Read(reader.internalByteBuffer)
+	bytesRead, err := reader.underlyingReader.Read(reader.readBuffer)
 	if err != nil {
 		return nil, err
 	}
 
-	reader.internalByteBuffer = append(reader.internalByteBuffer, reader.internalByteBuffer[:bytesRead]...)
+	reader.internalByteBuffer = append(reader.internalByteBuffer, reader.readBuffer[:bytesRead]...)
 
 	return nil, nil
 }

@@ -1,9 +1,119 @@
-package diameter
+package diameter_test
 
 import (
+	"io"
 	"net"
 	"testing"
+
+	diameter "github.com/blorticus-go/diameter"
+	"github.com/go-test/deep"
 )
+
+type ControlledReader struct {
+	readChunks              [][]byte
+	nextChunkProvidedOnRead int
+}
+
+func NewControlledReader(readChunks [][]byte) *ControlledReader {
+	return &ControlledReader{
+		readChunks:              readChunks,
+		nextChunkProvidedOnRead: 0,
+	}
+}
+
+func (r *ControlledReader) Read(into []byte) (n int, err error) {
+	if r.nextChunkProvidedOnRead >= len(r.readChunks) {
+		return 0, io.EOF
+	}
+	nextChunk := r.readChunks[r.nextChunkProvidedOnRead]
+	r.nextChunkProvidedOnRead++
+	return copy(into, nextChunk), nil
+}
+
+type EncodedAndDecodedAvps struct {
+	EncodedBytes []byte
+	Avp          *diameter.AVP
+}
+
+var encDecAvpByName = map[string]*EncodedAndDecodedAvps{
+	"originHost-host.example.com": {
+		EncodedBytes: []byte{0x00, 0x00, 0x01, 0x08, 0x40, 0x00, 0x00, 0x18, 0x68, 0x6f, 0x73, 0x74, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d},
+		Avp: &diameter.AVP{
+			Code: 264, VendorSpecific: false, Mandatory: true, Protected: false, VendorID: 0, Length: 24, PaddedLength: 24, ExtendedAttributes: nil,
+			Data: []byte{0x68, 0x6f, 0x73, 0x74, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d},
+		},
+	},
+	"originRealm-example.com": {
+		EncodedBytes: []byte{0x00, 0x00, 0x01, 0x28, 0x40, 0x00, 0x00, 0x13, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x00},
+		Avp: &diameter.AVP{
+			Code: 296, VendorSpecific: false, Mandatory: true, Protected: false, VendorID: 0, Length: 19, PaddedLength: 20, ExtendedAttributes: nil,
+			Data: []byte{0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d},
+		},
+	},
+	"hostIpAddress-10.20.30.1": {
+		EncodedBytes: []byte{0x00, 0x00, 0x01, 0x01, 0x40, 0x00, 0x00, 0x0e, 0x00, 0x01, 0x0a, 0x14, 0x1e, 0x01, 0x00, 0x00},
+		Avp: &diameter.AVP{
+			Code: 257, VendorSpecific: false, Mandatory: true, Protected: false, VendorID: 0, Length: 14, PaddedLength: 16, ExtendedAttributes: nil,
+			Data: []byte{0x00, 0x01, 0x0a, 0x14, 0x1e, 0x01},
+		},
+	},
+	"vendorId-0": {
+		EncodedBytes: []byte{0x00, 0x00, 0x01, 0x0a, 0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00},
+		Avp: &diameter.AVP{
+			Code: 266, VendorSpecific: false, Mandatory: true, Protected: false, VendorID: 0, Length: 12, PaddedLength: 12, ExtendedAttributes: nil,
+			Data: []byte{0x00, 0x00, 0x00, 0x00},
+		},
+	},
+	"productName-GoDiameter": {
+		EncodedBytes: []byte{0x00, 0x00, 0x01, 0x0d, 0x40, 0x00, 0x00, 0x12, 0x47, 0x6f, 0x44, 0x69, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00},
+		Avp: &diameter.AVP{
+			Code: 269, VendorSpecific: false, Mandatory: true, Protected: false, VendorID: 0, Length: 18, PaddedLength: 20, ExtendedAttributes: nil,
+			Data: []byte{0x47, 0x6f, 0x44, 0x69, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72},
+		},
+	},
+}
+
+func flattedBytes(in ...[]byte) []byte {
+	totalLength := 0
+	for _, ba := range in {
+		totalLength += len(ba)
+	}
+	b := make([]byte, 0, totalLength)
+
+	for _, ba := range in {
+		b = append(b, ba...)
+	}
+
+	return b
+}
+
+type EncodedAndDecodedMessage struct {
+	EncodedBytes []byte
+	Message      *diameter.Message
+}
+
+var testMessagesByName = map[string]*EncodedAndDecodedMessage{
+	"Basic-CER-01": {
+		EncodedBytes: flattedBytes(
+			[]byte{0x01, 0x00, 0x00, 0x70, 0xc0, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x10, 0x10, 0x10, 0x10, 0xab, 0xcd, 0x00, 0x00},
+			encDecAvpByName["originHost-host.example.com"].EncodedBytes,
+			encDecAvpByName["originRealm-example.com"].EncodedBytes,
+			encDecAvpByName["hostIpAddress-10.20.30.1"].EncodedBytes,
+			encDecAvpByName["vendorId-0"].EncodedBytes,
+			encDecAvpByName["productName-GoDiameter"].EncodedBytes,
+		),
+		Message: &diameter.Message{
+			Version: 1, Length: 112, Flags: 0xc0, Code: 257, AppID: 0, HopByHopID: 0x10101010, EndToEndID: 0xabcd0000,
+			Avps: []*diameter.AVP{
+				encDecAvpByName["originHost-host.example.com"].Avp,
+				encDecAvpByName["originRealm-example.com"].Avp,
+				encDecAvpByName["hostIpAddress-10.20.30.1"].Avp,
+				encDecAvpByName["vendorId-0"].Avp,
+				encDecAvpByName["productName-GoDiameter"].Avp,
+			},
+		},
+	},
+}
 
 type FlagsTestSet struct {
 	value       uint8
@@ -24,7 +134,7 @@ func TestFlags(t *testing.T) {
 	var i uint8
 
 	for i = 0; i <= 0x0f; i++ {
-		m := Message{Flags: i}
+		m := diameter.Message{Flags: i}
 
 		if m.IsRequest() {
 			t.Error("For value ", i, " should not be request")
@@ -41,7 +151,7 @@ func TestFlags(t *testing.T) {
 	}
 
 	for _, set := range flagstest {
-		m := Message{Flags: set.value}
+		m := diameter.Message{Flags: set.value}
 
 		if m.IsRequest() != set.isRequest {
 			t.Error("For value ", i, " expect isRequest == ", set.isRequest, " but does not match")
@@ -61,12 +171,12 @@ func TestFlags(t *testing.T) {
 
 type EncodeTestSet struct {
 	flags         uint8
-	code          Uint24
+	code          diameter.Uint24
 	appID         uint32
 	hopByHopID    uint32
 	endToEndID    uint32
-	mandatoryAvps []*AVP
-	optionalAvps  []*AVP
+	mandatoryAvps []*diameter.AVP
+	optionalAvps  []*diameter.AVP
 	encoded       []byte
 }
 
@@ -74,18 +184,18 @@ type EncodeTestSet struct {
 // The message is encoded, and the encoded stream is compared to 'encoded'
 var encodetests = []EncodeTestSet{
 	// -- TEST 1: just header
-	{0x00 | MsgFlagRequest | MsgFlagProxiable, 203, 0, 0x10101010, 0xabcd0000, []*AVP{}, []*AVP{},
+	{0x00 | diameter.MsgFlagRequest | diameter.MsgFlagProxiable, 203, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{}, []*diameter.AVP{},
 		[]byte{0x01, 0x00, 0x00, 0x14, 0xc0, 0x00, 0x00, 0xcb, 0x00, 0x00, 0x00, 0x00, 0x10, 0x10, 0x10, 0x10, 0xab, 0xcd, 0x00, 0x00}},
 	// -- TEST 2: CER with only mandatory AVPs
-	{0x00 | MsgFlagRequest | MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000,
-		[]*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
+	{0x00 | diameter.MsgFlagRequest | diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000,
+		[]*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
 		},
-		[]*AVP{},
+		[]*diameter.AVP{},
 		[]byte{
 			// header
 			0x01, 0x00, 0x00, 0x70,
@@ -104,15 +214,15 @@ var encodetests = []EncodeTestSet{
 			// Product-Name
 			0x00, 0x00, 0x01, 0x0d, 0x40, 0x00, 0x00, 0x12, 0x47, 0x6f, 0x44, 0x69, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00}},
 	// -- TEST 3: Same CER, but set flag of some mandatory AVPs to not mandatory; they should be flipped to mandatory
-	{0x00 | MsgFlagRequest | MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000,
-		[]*AVP{
-			NewTypedAVP(264, 0, false, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, false, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, false, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
+	{0x00 | diameter.MsgFlagRequest | diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000,
+		[]*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, false, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, false, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, false, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
 		},
-		[]*AVP{},
+		[]*diameter.AVP{},
 		[]byte{
 			// header
 			0x01, 0x00, 0x00, 0x70,
@@ -132,17 +242,17 @@ var encodetests = []EncodeTestSet{
 			0x00, 0x00, 0x01, 0x0d, 0x40, 0x00, 0x00, 0x12, 0x47, 0x6f, 0x44, 0x69, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00,
 		}},
 	// -- TEST 4: Same as previous test, but add some optional AVPs, also with mandatory flags set and unset
-	{0x00 | MsgFlagRequest | MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000,
-		[]*AVP{
-			NewTypedAVP(264, 0, false, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, false, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, false, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
+	{0x00 | diameter.MsgFlagRequest | diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000,
+		[]*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, false, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, false, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, false, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
 		},
-		[]*AVP{
-			NewTypedAVP(265, 0, false, Unsigned32, uint32(18)),
-			NewTypedAVP(258, 0, true, Unsigned32, uint32(65536)),
+		[]*diameter.AVP{
+			diameter.NewTypedAVP(265, 0, false, diameter.Unsigned32, uint32(18)),
+			diameter.NewTypedAVP(258, 0, true, diameter.Unsigned32, uint32(65536)),
 		},
 		[]byte{
 			// header -- length = 20
@@ -170,7 +280,7 @@ var encodetests = []EncodeTestSet{
 
 func TestEncode(t *testing.T) {
 	for testnum, set := range encodetests {
-		m := NewMessage(set.flags, set.code, set.appID, set.hopByHopID, set.endToEndID, set.mandatoryAvps, set.optionalAvps)
+		m := diameter.NewMessage(set.flags, set.code, set.appID, set.hopByHopID, set.endToEndID, set.mandatoryAvps, set.optionalAvps)
 
 		if m == nil {
 			t.Error("Message is nil")
@@ -193,7 +303,7 @@ func TestEncode(t *testing.T) {
 type DecodeTestSet struct {
 	encoded    []byte
 	flags      uint8
-	code       Uint24
+	code       diameter.Uint24
 	appID      uint32
 	hopByHopID uint32
 	endToEndID uint32
@@ -237,7 +347,7 @@ var decodetests = []DecodeTestSet{
 
 func TestDecode(t *testing.T) {
 	for testnum, set := range decodetests {
-		m, err := DecodeMessage(set.encoded)
+		m, err := diameter.DecodeMessage(set.encoded)
 
 		if err != nil {
 			t.Error("Failed to decode message stream: ", err.Error())
@@ -280,7 +390,7 @@ func TestMessageStreamWithOneCompleteMessageOnlyInOneRead(t *testing.T) {
 		0x00, 0x00, 0x01, 0x0d, 0x00, 0x00, 0x00, 0x0e, 0x6a, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00,
 	}
 
-	messageReader := NewMessageByteReader()
+	messageReader := diameter.NewMessageByteReader()
 
 	messages, err := messageReader.ReceiveBytes(stream)
 
@@ -308,7 +418,7 @@ func TestMessageStreamWithOneCompleteMessageInThreeReads(t *testing.T) {
 		0x00, 0x00, 0x01, 0x0d, 0x00, 0x00, 0x00, 0x0e, 0x6a, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00,
 	}
 
-	messageReader := NewMessageByteReader()
+	messageReader := diameter.NewMessageByteReader()
 
 	messages, err := messageReader.ReceiveBytes(stream[0:20])
 
@@ -381,7 +491,7 @@ func TestMessageStreamWithThreeCompleteMessagesInOneRead(t *testing.T) {
 		0x00, 0x00, 0x01, 0x0d, 0x00, 0x00, 0x00, 0x0e, 0x6a, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00,
 	}
 
-	messageReader := NewMessageByteReader()
+	messageReader := diameter.NewMessageByteReader()
 
 	messages, err := messageReader.ReceiveBytes(stream)
 
@@ -433,7 +543,7 @@ func TestMessageStreamWithThreeCompleteMessagesInThreeReads(t *testing.T) {
 		0x00, 0x00, 0x01, 0x0d, 0x00, 0x00, 0x00, 0x0e, 0x6a, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x00, 0x00,
 	}
 
-	messageReader := NewMessageByteReader()
+	messageReader := diameter.NewMessageByteReader()
 
 	messages, err := messageReader.ReceiveBytes(stream[0:2])
 
@@ -466,97 +576,125 @@ func TestMessageStreamWithThreeCompleteMessagesInThreeReads(t *testing.T) {
 	}
 }
 
-func TestFindFirstAVPByCode(t *testing.T) {
-	message := NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-		NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-		NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-		NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-		NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-		NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-	}, []*AVP{})
+func TestStreamReaderWithExactlyOneMessageInOnePart(t *testing.T) {
+	basicCer01 := testMessagesByName["Basic-CER-01"]
 
-	for _, code := range []Uint24{264, 296, 257, 266, 269} {
-		matchingAvp := message.FindFirstAVPByCode(code)
+	stream := basicCer01.EncodedBytes
+	reader := NewControlledReader([][]byte{stream})
+
+	streamReader := diameter.NewMessageStreamReader(reader)
+
+	m, err := streamReader.ReadNextMessage()
+	if err != nil {
+		t.Fatalf("on first ReadNextMessage(), expected no error, got = (%s)", err)
+	}
+
+	if diff := deep.Equal(m, basicCer01.Message); diff != nil {
+		t.Fatalf("after first ReadNextMessage(), messages differ: %s", diff)
+	}
+
+	m, err = streamReader.ReadNextMessage()
+	if err == nil {
+		t.Errorf("on second ReadNextMessage(), expected io.EOF, got no error")
+	} else if err != io.EOF {
+		t.Errorf("on second ReadNextMessage(), expected io.EOF, got error = (%s)", err)
+	}
+	if m != nil {
+		t.Fatalf("on second ReadNextMessage(), expected message to be nil, but it is not")
+	}
+}
+
+func TestFindFirstAVPByCode(t *testing.T) {
+	message := diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+		diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+		diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+		diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+		diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+		diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+	}, []*diameter.AVP{})
+
+	for _, code := range []diameter.Uint24{264, 296, 257, 266, 269} {
+		matchingAvp := message.FirstAvpMatching(0, code)
 
 		if matchingAvp == nil {
 			t.Errorf("For First test, expected FindFirstAVPByCode(%d) to return non-nil, returned nil", code)
 		}
 	}
 
-	for _, code := range []Uint24{263, 265, 0, 270, 2690} {
-		matchingAvp := message.FindFirstAVPByCode(code)
+	for _, code := range []diameter.Uint24{263, 265, 0, 270, 2690} {
+		matchingAvp := message.FirstAvpMatching(0, code)
 
 		if matchingAvp != nil {
 			t.Errorf("For First test, expected FindFirstAVPByCode(%d) to return nil, returned non-nil", code)
 		}
 	}
 
-	message = NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-		NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-		NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-		NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-		NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-		NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.2")),
-		NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-	}, []*AVP{
-		NewTypedAVP(265, 0, false, Unsigned32, uint32(1)),
-		NewTypedAVP(265, 0, false, Unsigned32, uint32(10)),
-		NewTypedAVP(265, 0, false, Unsigned32, uint32(100)),
+	message = diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+		diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+		diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+		diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+		diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+		diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.2")),
+		diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+	}, []*diameter.AVP{
+		diameter.NewTypedAVP(265, 0, false, diameter.Unsigned32, uint32(1)),
+		diameter.NewTypedAVP(265, 0, false, diameter.Unsigned32, uint32(10)),
+		diameter.NewTypedAVP(265, 0, false, diameter.Unsigned32, uint32(100)),
 	})
 
-	for _, code := range []Uint24{264, 296, 266, 269} {
-		matchingAvp := message.FindFirstAVPByCode(code)
+	for _, code := range []diameter.Uint24{264, 296, 266, 269} {
+		matchingAvp := message.FirstAvpMatching(0, code)
 
 		if matchingAvp == nil {
 			t.Errorf("For Second test, expected FindFirstAVPByCode(%d) to return non-nil, returned nil", code)
 		}
 	}
 
-	for _, code := range []Uint24{263, 0, 270, 2690} {
-		matchingAvp := message.FindFirstAVPByCode(code)
+	for _, code := range []diameter.Uint24{263, 0, 270, 2690} {
+		matchingAvp := message.FirstAvpMatching(0, code)
 
 		if matchingAvp != nil {
 			t.Errorf("For Second test, expected FindFirstAVPByCode(%d) to return nil, returned non-nil", code)
 		}
 	}
 
-	matchingAvp := message.FindFirstAVPByCode(257)
+	matchingAvp := message.FirstAvpMatching(0, 257)
 
 	if matchingAvp == nil {
 		t.Errorf("For Second test, expected FindFirstAVPByCode(257) to return nil, returned non-nil")
 	} else {
-		if !matchingAvp.Equal(NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1"))) {
+		if !matchingAvp.Equal(diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1"))) {
 			t.Errorf("For Second test, FindFirstAVPByCode(257) does not return the AVP instance expected")
 		}
 	}
 
-	matchingAvp = message.FindFirstAVPByCode(265)
+	matchingAvp = message.FirstAvpMatching(0, 265)
 
 	if matchingAvp == nil {
 		t.Errorf("For Second test, expected FindFirstAVPByCode(265) to return nil, returned non-nil")
 	} else {
-		if !matchingAvp.Equal(NewTypedAVP(265, 0, false, Unsigned32, uint32(1))) {
+		if !matchingAvp.Equal(diameter.NewTypedAVP(265, 0, false, diameter.Unsigned32, uint32(1))) {
 			t.Errorf("For Second test, FindFirstAVPByCode(265) does not return the AVP instance expected")
 		}
 	}
 }
 
 func TestMessageEqualsWhenMessagesAreEqual(t *testing.T) {
-	leftMessage := NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-		NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-		NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-		NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-		NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-		NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-	}, []*AVP{})
+	leftMessage := diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+		diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+		diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+		diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+		diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+		diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+	}, []*diameter.AVP{})
 
-	rightMessage := NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-		NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-		NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-		NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-		NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-		NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-	}, []*AVP{})
+	rightMessage := diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+		diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+		diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+		diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+		diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+		diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+	}, []*diameter.AVP{})
 
 	if !leftMessage.Equals(rightMessage) {
 		t.Errorf("Expected leftMessage.Equal(rightMessage) to be true, is false")
@@ -568,78 +706,78 @@ func TestMessageEqualsWhenMessagesAreEqual(t *testing.T) {
 }
 
 func TestMessageEqualsWhenMessagesAreNotEqual(t *testing.T) {
-	leftMessage := NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-		NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-		NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-		NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-		NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-		NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-	}, []*AVP{})
+	leftMessage := diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+		diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+		diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+		diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+		diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+		diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+	}, []*diameter.AVP{})
 
-	messagesToCompare := []*Message{
+	messagesToCompare := []*diameter.Message{
 		// Flags differ
-		NewMessage(MsgFlagRequest, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// Message codes differ
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 258, 0, 0x10101010, 0xabcd0000, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 258, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// Vendor IDs differ
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 1, 0x10101010, 0xabcd0000, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 1, 0x10101010, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// Hop-By-Hop IDs differ
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10, 0xabcd0000, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// End-To-End IDs differ
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xa, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xa, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// AVP Set missing one AVP
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// Second AVP in Set has different value
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.org"),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.org"),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 		// AVP Set order differs value
-		NewMessage(MsgFlagRequest|MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*AVP{
-			NewTypedAVP(264, 0, true, DiamIdent, "host.example.com"),
-			NewTypedAVP(296, 0, true, DiamIdent, "example.com"),
-			NewTypedAVP(266, 0, true, Unsigned32, uint32(0)),
-			NewTypedAVP(257, 0, true, Address, net.ParseIP("10.20.30.1")),
-			NewTypedAVP(269, 0, true, UTF8String, "GoDiameter"),
-		}, []*AVP{}),
+		diameter.NewMessage(diameter.MsgFlagRequest|diameter.MsgFlagProxiable, 257, 0, 0x10101010, 0xabcd0000, []*diameter.AVP{
+			diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "host.example.com"),
+			diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+			diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, uint32(0)),
+			diameter.NewTypedAVP(257, 0, true, diameter.Address, net.ParseIP("10.20.30.1")),
+			diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "GoDiameter"),
+		}, []*diameter.AVP{}),
 	}
 
 	for comparisonMessageIndex, rightMessage := range messagesToCompare {

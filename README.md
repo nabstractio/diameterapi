@@ -1,135 +1,134 @@
 # golang Diameter
 
-## Creating and using a Dictionary
+A golang library for the Diameter protocol.
 
-A dictionary defines AVP code and type information, as well as message types and their corresponding codes.  A set of standard dictionaries are available in the dictionaries/ directory.
+## Diameter Library
 
-```yaml
-AvpTypes:
-    - Name: "Auth-Application-Id"
-      Code: 258
-      Type: "Unsigned32"
-    - Name: "Auth-Request-Type"
-      Code: 274
-      Type: "Enumerated"
-      Enumeration:
-        - Name: "AUTHENTICATE_ONLY"
-          Value: 1
-        - Name: "AUTHORIZE_ONLY"
-          Value: 2
-        - Name: "AUTHORIZE_AUTHENTICATE"
-          Value: 3
-    - Name: "Acct-Session-Id"
-      Code: 44
-      Type: "OctetString"
-    - Name: "Accounting-Sub-Session-Id"
-      Code: 287
-      Type: "Unsigned64"
-    - Name: "Error-Message"
-      Code: 281
-      Type: "UTF8String"
-    - Name: "Error-Reporting-Host"
-      Code: 294
-      Type: "DiamIdent"
-    - Name: "Experimental-Result"
-      Code: 297
-      Type: "Grouped"
-    - Name: "Host-IP-AddressInband-Security"
-      Code: 257
-      Type: "Address"
-    - Name: "Redirect-Host"
-      Code: 292
-      Type: "DiamURI"
-MessageTypes:
-    - Basename: "Accouting"
-      Abbreviations:
-          Request: "ACR"
-          Answer: "ACA"
-      Code: 271
-    - Basename: "Capabilities-Exchange"
-      Abbreviations:
-          Request: "CER"
-          Answer: "CEA"
-      Code: 257
-    - Basename: "Device-Watchdog"
-      Abbreviations:
-          Request: "DWR"
-          Answer: "DWA"
-      Code: 280
-    - Basename: "Disconnect-Peer"
-      Abbreviations:
-          Request: "DPR"
-          Answer: "DPA"
-      Code: 282
-    - Basename: "Provide-Location"
-      Abbreviations:
-        Request: "PLR"
-        Answer: "PLA"
-      Code: 8388620
-      Application-Id: 16777255
+This module provides methods for encoding and decoding Diameter messages and AVPs.  Since Diameter is typically carried over TCP or SCTP, it also provides a stream reader, which extracts Diameter messages from a stream protocol.  The following example illustrates reading and writing Diameter messages from a stream:
+
+```go
+package main
+
+import (
+  "fmt"
+  "os"
+  "github.com/blorticus-go/diameter"
+)
+
+func main() {
+  c, err := net.Dial("tcp", "10.10.10.1:5060")
+  if err != nil {
+    panic(err)
+  }
+  defer c.Close()
+
+  sr := diameter.NewMessageStreamReader(c)
+  g := diameter.NewSequenceGeneratorSet()
+
+  cer := diameter.NewMessage(diameter.MsgFlagRequest, 257, 0, g.NextHopByHopId(), g.NextEndToEndId(), []*AVP{
+    diameter.NewTypedAVP(264, 0, true, diameter.DiamIdent, "client01.example.com"),
+    diameter.NewTypedAVP(296, 0, true, diameter.DiamIdent, "example.com"),
+    diameter.NewTypedAVP(257, 0, true, diameter.Address, c.LocalAddr().(net.TCPAddr).IP),
+    diameter.NewTypedAVP(266, 0, true, diameter.Unsigned32, 0),
+    diameter.NewTypedAVP(269, 0, true, diameter.UTF8String, "go-diameter"),
+  }, nil)
+
+  if _, err := c.Write(cer.Encode()); err != nil {
+    panic(err)
+  }
+
+  incomingMessage, err := sr.ReadNextMessage()
+  if err != nil {
+    panic(err)
+  }
+
+  if incomingMessage.Code != 257 {
+    fmt.Fprintf(os.Stderr, "expected CEA, got message with Code (%d)\n", incomingMessage.Code)
+    os.Exit(1)
+  }
+
+  if incomingMessage.IsRequest() {
+    fmt.Fprintf(os.Stderr, "expected CEA, CER\n")
+    os.Exit(2)
+  }
+
+  peerOriginHostAvp := FirstAvpMatching(264, 0)
+  if peerOriginHostAvp == nil {
+    fmt.Fprintf(os.Stderr, "peer failed to send Origin-Host in CEA\n")
+    os.Exit(3)
+  }
+
+  peerOriginHostValue := string(peerOriginHostAvp.Data)
+  fmt.Printf("received CEA from peer with Origin-Host (%s)\n", peerOriginHostValue)
+
+  // ...
+}
 ```
 
-To load and use a dictionary:
+## Diameter Dictionaries
 
-```golang
-    d := diameter.dictionary.FromYamlFile( yaml_dictionary_file_path )
-    avp := AVP("Auth-Application-Id", uint32(0))
+A Diameter dictionary allows one to provide human-readable names for Diameter message and AVP codes, and to provide type definitions for AVPs so that, when they are read, they can automatically be typed.  The `diameter.Dictionary` type can be generated from a YAML file.  The `examples` directory contains a sample dictionary for the base Diameter application.  Here is an example using a dictionary.
 
-```
+```go
+package main
 
-To use a dictionary:
+import (
+  "fmt"
+  "os"
+  "github.com/blorticus-go/diameter"
+)
 
-```golang
+func main() {
+  dictionary, err := diameter.DictionaryFromYamlFile("./dictionary.yaml")
+  if err != nil {
+    panic(err)
+  }
 
-```
+  c, err := net.Dial("tcp", "10.10.10.1:5060")
+  if err != nil {
+    panic(err)
+  }
+  defer c.Close()
 
-## Base Application Server
+  sr := diameter.NewMessageStreamReader(c)
+  g := diameter.NewSequenceGeneratorSet()
 
-```golang
-    server := NewBaseApplicationServer(BaseCapabilities{OriginHost: "host", OriginRealm: "realm", ...}).
-        SetAuthApplicationIDs(uint32[]{1, 2, 3}).
-        SetIncomingTransportFilter(transportFilterFunction).
-        SetIncomingCapabilitiesExchangeFilter(cerFilterFunction)
-    serverEventChan := make(chan *BaseNodeEventMessage)
-    server.Start(serverEventChan)
+  cer := dictionary.NewMessage("CER", MessageFlags(0), 0, []*AVP{
+    dictionary.AVP("Origin-Host", "client01.example.com"),
+    dictionary.AVP("Origin-Realm", "example.com"),
+    dictionary.AVP("Host-IP-Address", c.LocalAddr().(net.TCPAddr).IP),
+    dictionary.AVP("Vendor-Id", 0),
+    dictionary.AVP("Product-Name", "go-diameter"),
+  }, nil)
 
-    for {
-        switch event := <-serverEventChan; event.Type {
-        case IncomingTransportAttemptBlocked:
-            // ...
+  if _, err := c.Write(cer.Encode()); err != nil {
+    panic(err)
+  }
 
-        case IncomingPeerBlockedOnCapbilitiesExchange:
-            // ...
+  incomingMessage, err := sr.ReadNextMessage()
+  if err != nil {
+    panic(err)
+  }
 
-        case CapabilitiesExchangeSuccessfullyCompleted:
-            // ...
+  answer, err := dictionary.TypeAMessage(incomingMessage)
+  if err != nil {
+    panic(err)
+  }
 
-        // ... etc ...
-        }
-    }
-```
+  if answer.ExtendedAttributes.Abbreviated != "CEA" {*
+    fmt.Fprintf(os.Stderr, "expected CEA, CER\n")
+    os.Exit(2)
+  }
 
-## Base Application Client
+  peerOriginHostAvp := FirstAvpMatching(264, 0)
+  if peerOriginHostAvp == nil {
+    fmt.Fprintf(os.Stderr, "peer failed to send Origin-Host in CEA\n")
+    os.Exit(3)
+  }
 
-```golang
-    client := NewBaseApplicationClient(BaseCapabilities{OriginHost: "host", OriginRealm: "realm", ...}).
-        SetAuthApplicationIDs(uint32[]{1, 2, 3}).
-        SetIncomingTransportFilter(transportFilterFunction).
-        SetIncomingCapabilitiesExchangeFilter(cerFilterFunction)
-    clientEventChan := make(chan *BaseNodeEventMessage)
-    client.Start(clientEventChan)
+  peerOriginHostValue := string(peerOriginHostAvp.Data)
+  fmt.Printf("received CEA from peer with Origin-Host (%s)\n", peerOriginHostValue)
 
-    for {
-        select {
-            case event := <-clientEventChan:
-                switch event.Type {
-                    // ...
-                }
-
-            default:
-                if someConditionIsTrue {
-                    client.ConnectToServer(...)
-                }
-        }
-    }
+  // ...
+}
 ```

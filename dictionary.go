@@ -31,7 +31,7 @@ type DictionaryYamlAvpType struct {
 	Name        string                             `yaml:"Name"`
 	Code        uint32                             `yaml:"Code"`
 	Type        string                             `yaml:"Type"`
-	VendorID    uint32                             `yaml:"Vendor-Id"`
+	VendorID    uint32                             `yaml:"VendorId"`
 	Enumeration []DictionaryYamlAvpEnumerationType `yaml:"Enumeration"`
 }
 
@@ -45,7 +45,7 @@ type DictionaryYamlMessageAbbreviation struct {
 type DictionaryYamlMessageType struct {
 	Basename      string                            `yaml:"Basename"`
 	Code          uint32                            `yaml:"Code"`
-	ApplicationID uint32                            `yaml:"Application-Id"`
+	ApplicationID uint32                            `yaml:"ApplicationId"`
 	Abbreviations DictionaryYamlMessageAbbreviation `yaml:"Abbreviations"`
 }
 
@@ -57,6 +57,7 @@ type DictionaryYaml struct {
 
 type dictionaryMessageDescriptor struct {
 	name          string
+	abbreviation  string
 	code          uint32
 	appID         uint32
 	isRequestType bool
@@ -75,11 +76,16 @@ type avpFullyQualifiedCodeType struct {
 	code     uint32
 }
 
+type messageFullyQualifiedCodeType struct {
+	applicationID uint32
+	code          uint32
+}
+
 // Dictionary is a Diameter dictionary, mapping AVP and message type data to names
 type Dictionary struct {
 	messageDescriptorByNameOrAbbreviation map[string]*dictionaryMessageDescriptor
-	requestMessageDescriptorByCode        map[uint32]*dictionaryMessageDescriptor
-	answerMessageDescriptorByCode         map[uint32]*dictionaryMessageDescriptor
+	requestMessageDescriptorByCode        map[messageFullyQualifiedCodeType]*dictionaryMessageDescriptor
+	answerMessageDescriptorByCode         map[messageFullyQualifiedCodeType]*dictionaryMessageDescriptor
 	avpDescriptorByName                   map[string]*dictionaryAvpDescriptor
 	avpDescriptorByFullyQualifiedCode     map[avpFullyQualifiedCodeType]*dictionaryAvpDescriptor
 }
@@ -109,7 +115,7 @@ func convertYamlAvpToDictionaryAvpDescriptor(yamlAvp *DictionaryYamlAvpType) (*d
 	if avpDataType, typeStringIsRecognized := mapOfYamlAvpTypeStringToAVPDataType[yamlAvp.Type]; typeStringIsRecognized {
 		avpDescriptor.dataType = avpDataType
 	} else {
-		return nil, fmt.Errorf("Provided Type (%s) invalid", yamlAvp.Type)
+		return nil, fmt.Errorf("provided Type (%s) invalid", yamlAvp.Type)
 	}
 
 	if yamlAvp.VendorID != 0 {
@@ -124,8 +130,8 @@ func convertYamlAvpToDictionaryAvpDescriptor(yamlAvp *DictionaryYamlAvpType) (*d
 func fromYamlForm(yamlForm *DictionaryYaml) (*Dictionary, error) {
 	dictionary := Dictionary{
 		messageDescriptorByNameOrAbbreviation: make(map[string]*dictionaryMessageDescriptor),
-		requestMessageDescriptorByCode:        make(map[uint32]*dictionaryMessageDescriptor),
-		answerMessageDescriptorByCode:         make(map[uint32]*dictionaryMessageDescriptor),
+		requestMessageDescriptorByCode:        make(map[messageFullyQualifiedCodeType]*dictionaryMessageDescriptor),
+		answerMessageDescriptorByCode:         make(map[messageFullyQualifiedCodeType]*dictionaryMessageDescriptor),
 		avpDescriptorByName:                   make(map[string]*dictionaryAvpDescriptor),
 		avpDescriptorByFullyQualifiedCode:     make(map[avpFullyQualifiedCodeType]*dictionaryAvpDescriptor),
 	}
@@ -144,6 +150,7 @@ func fromYamlForm(yamlForm *DictionaryYaml) (*Dictionary, error) {
 	for _, yamlMessageType := range yamlForm.MessageTypes {
 		messageDescriptor := &dictionaryMessageDescriptor{
 			code:          yamlMessageType.Code,
+			abbreviation:  yamlMessageType.Abbreviations.Request,
 			name:          yamlMessageType.Basename + "-Request",
 			appID:         yamlMessageType.ApplicationID,
 			isRequestType: true,
@@ -151,10 +158,11 @@ func fromYamlForm(yamlForm *DictionaryYaml) (*Dictionary, error) {
 
 		dictionary.messageDescriptorByNameOrAbbreviation[yamlMessageType.Basename+"-Request"] = messageDescriptor
 		dictionary.messageDescriptorByNameOrAbbreviation[yamlMessageType.Abbreviations.Request] = messageDescriptor
-		dictionary.requestMessageDescriptorByCode[yamlMessageType.Code] = messageDescriptor
+		dictionary.requestMessageDescriptorByCode[messageFullyQualifiedCodeType{yamlMessageType.ApplicationID, yamlMessageType.Code}] = messageDescriptor
 
 		messageDescriptor = &dictionaryMessageDescriptor{
 			code:          yamlMessageType.Code,
+			abbreviation:  yamlMessageType.Abbreviations.Answer,
 			name:          yamlMessageType.Basename + "-Answer",
 			appID:         yamlMessageType.ApplicationID,
 			isRequestType: false,
@@ -162,7 +170,7 @@ func fromYamlForm(yamlForm *DictionaryYaml) (*Dictionary, error) {
 
 		dictionary.messageDescriptorByNameOrAbbreviation[yamlMessageType.Basename+"-Answer"] = messageDescriptor
 		dictionary.messageDescriptorByNameOrAbbreviation[yamlMessageType.Abbreviations.Answer] = messageDescriptor
-		dictionary.answerMessageDescriptorByCode[yamlMessageType.Code] = messageDescriptor
+		dictionary.answerMessageDescriptorByCode[messageFullyQualifiedCodeType{yamlMessageType.ApplicationID, yamlMessageType.Code}] = messageDescriptor
 	}
 
 	return &dictionary, nil
@@ -194,7 +202,20 @@ func DictionaryFromYamlString(yamlString string) (*Dictionary, error) {
 	}
 
 	return dictionary, nil
+}
 
+func (dictionary *Dictionary) MessageCodeAsAString(m *Message) string {
+	if m.IsRequest() {
+		if name := dictionary.requestMessageDescriptorByCode[messageFullyQualifiedCodeType{m.AppID, uint32(m.Code)}]; name != nil {
+			return name.name
+		}
+	} else {
+		if name := dictionary.answerMessageDescriptorByCode[messageFullyQualifiedCodeType{m.AppID, uint32(m.Code)}]; name != nil {
+			return name.name
+		}
+	}
+
+	return ""
 }
 
 // DataTypeForAVPNamed looks up the data type for the specific AVP
@@ -206,6 +227,15 @@ func (dictionary *Dictionary) DataTypeForAVPNamed(name string) (AVPDataType, err
 	}
 
 	return descriptor.dataType, nil
+}
+
+// DataTypeForAvp returns the AVPDataType for the AVP based on its vendor-id and code.  If the type is not in the dictionary, returns TypeOrAvpUnknown.
+func (dictionary *Dictionary) DataTypeForAvp(avp *AVP) AVPDataType {
+	if diameterType, isInMap := dictionary.avpDescriptorByFullyQualifiedCode[avpFullyQualifiedCodeType{avp.VendorID, avp.Code}]; isInMap {
+		return diameterType.dataType
+	}
+
+	return TypeOrAvpUnknown
 }
 
 // AVPErrorable returns an AVP based on the dictionary definition.  If the name is not in
@@ -235,6 +265,33 @@ func (dictionary *Dictionary) AVP(name string, value interface{}) *AVP {
 	return avp
 }
 
+// TypeAnAvp attempts to provide the ExtendedAttributes for the provided AVP.  If the AVP type
+// is not found in the dictionary, the ExtendedAttributes for untypedAvp is set to nil and the
+// untypedAvp is returned.  If an error occurs when attempting to conver the AVP's data to the
+// type in the dictionary, return (nil, err).  Otherwise, return untypedAvp with its
+// ExtendedAttributes set.
+func (dictionary *Dictionary) TypeAnAvp(untypedAvp *AVP) (*AVP, error) {
+	avpInfo, isInMap := dictionary.avpDescriptorByFullyQualifiedCode[avpFullyQualifiedCodeType{untypedAvp.VendorID, untypedAvp.Code}]
+
+	if !isInMap || avpInfo.dataType == TypeOrAvpUnknown {
+		untypedAvp.ExtendedAttributes = nil
+		return untypedAvp, nil
+	}
+
+	typedData, err := untypedAvp.ConvertDataToTypedData(avpInfo.dataType)
+	if err != nil {
+		return nil, err
+	}
+
+	untypedAvp.ExtendedAttributes = &AVPExtendedAttributes{
+		Name:       avpInfo.name,
+		DataType:   avpInfo.dataType,
+		TypedValue: typedData,
+	}
+
+	return untypedAvp, nil
+}
+
 // MessageFlags provides the Diameter Message flag types
 type MessageFlags struct {
 	Proxiable           bool
@@ -243,10 +300,7 @@ type MessageFlags struct {
 }
 
 // MessageErrorable returns a Message based on the dictionary definition.  If the name is
-// not present in the dictionary, an error is returned.  The AVP set will be re-arranged to
-// match the AVP order presented in the dictionary for the message type, and the mandatory
-// flag will be changed to match the definition for the message type.  An error, however, is
-// not raised if a mandatory flag is not present.
+// not present in the dictionary, an error is returned.
 func (dictionary *Dictionary) MessageErrorable(name string, flags MessageFlags, mandatoryAVPs []*AVP, additionalAVPs []*AVP) (*Message, error) {
 	messageDescriptor, messageTypeIsDefined := dictionary.messageDescriptorByNameOrAbbreviation[name]
 	if !messageTypeIsDefined {
@@ -280,4 +334,37 @@ func (dictionary *Dictionary) Message(name string, flags MessageFlags, mandatory
 	}
 
 	return m
+}
+
+// TypeAMessage attempts to provide ExendedAttribute information for the provided message based on a message
+// definition in the dictionary.  If no definition exists for the message type, the ExtendedAttributes is set to nil.
+// This method then iterates through the message AVP set, attempting to convert each AVP to its typed value (see TypeAnAvp).
+// If no error occurs, returns the original message with (possibly) typed AVPs.  Otherwise, returns nil and the error.
+func (dictionary *Dictionary) TypeAMessage(m *Message) (*Message, error) {
+	var descriptor *dictionaryMessageDescriptor
+	var descriptorIsInMap bool
+
+	if m.IsRequest() {
+		descriptor, descriptorIsInMap = dictionary.requestMessageDescriptorByCode[messageFullyQualifiedCodeType{m.AppID, uint32(m.Code)}]
+	} else {
+		descriptor, descriptorIsInMap = dictionary.answerMessageDescriptorByCode[messageFullyQualifiedCodeType{m.AppID, uint32(m.Code)}]
+	}
+
+	if descriptorIsInMap {
+		m.ExtendedAttributes = &MessageExtendedAttributes{
+			Name:            descriptor.name,
+			AbbreviatedName: descriptor.abbreviation,
+		}
+	} else {
+		m.ExtendedAttributes = nil
+	}
+
+	for _, avp := range m.Avps {
+		_, err := dictionary.TypeAnAvp(avp)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return m, nil
 }

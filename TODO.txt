@@ -1,3 +1,16 @@
 1. (23 Oct 2021) Add more test cases for dictionary positive matching
 2. (23 Oct 2021) Add negative test cases for dictionary
 3. (25 Oct 2021) Validate incoming CER and CEA against allowed capabilities
+4. (23 May 2024) Convert different Event Error types into a single Error, then use error type to distinguish
+5. (23 May 2024) Add AppId discriminator to dictionary
+6. (23 May 2024) Add unit tests for Dictionary.MessageCodeAsAString
+7. (23 May 2024) Add event for state machine messages being sent (since these would otherwise be invisible to the consumer of the Agent)
+8. (23 May 2024) Support appending to a dictionary (so multiple dictionary files can be read)
+9. (24 May 2024) Allow int for avp types that are integer based and add unit tests for this
+10. (27 May 2024) Add unit tests for type coersion of AVPs in the unsigned int and int families
+11. (30 May 2024) Add matching for HbHId and EtEId for state machine responses
+12. (30 May 2024) Validate Response-Code exists in state machine Answers
+13. (31 May 2024) The Address AVP type is incorrectly typed.  It can be things other than an IP address.  There should be a struct corresponding to this type with the discriminating type.
+14. (31 May 2024) Add a diameter.URI type that can be used for DiamURI, as well as a diameter.FQDN for the DiamIdent type
+15. (01 Jun 2024) Implement epoch time extension described in RFC 5905
+16. (03 Jun 2024) Remove the Uint24 type (it is unwieldy to use).  Anywhere the 24-bit is referenced, add a bounds check.

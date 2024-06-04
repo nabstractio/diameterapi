@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	diameter "github.com/blorticus/go-diameter"
+	diameter "github.com/blorticus-go/diameter"
 )
 
 type dictionaryMessageTestCase struct {
@@ -124,7 +124,7 @@ AvpTypes:
       Type: "DiamURI"
     - Name: "Globally-Unique-Address"
       Code: 300
-      Vendor-Id: 13019
+      VendorId: 13019
       Type: "Unsigned64"
 MessageTypes:
     - Basename: "Accouting"
@@ -152,13 +152,13 @@ MessageTypes:
           Request: "ULR"
           Answer: "ULA"
       Code: 316
-      Application-Id: 16777251
+      ApplicationId: 16777251
     - Basename: "Cancel-Location"
       Abbreviations:
           Request: "CLR"
           Answer: "CLA"
       Code: 317
-      Application-Id: 16777251
+      ApplicationId: 16777251
 `
 	messageTestCases := []*dictionaryMessageTestCase{
 		{
@@ -306,7 +306,7 @@ AvpTypes:
       Type: "OctetString"
 `
 
-	dictionary, err = diameter.DictionaryFromYamlString(InvalidDefinition)
+	_, err = diameter.DictionaryFromYamlString(InvalidDefinition)
 
 	if err == nil {
 		t.Errorf("Expected error when AvpType.Type = Unsigned32 on first AVP, but got no error")
@@ -332,7 +332,7 @@ AvpTypes:
       Type: "OctetString"
 `
 
-	dictionary, err = diameter.DictionaryFromYamlString(InvalidDefinition)
+	_, err = diameter.DictionaryFromYamlString(InvalidDefinition)
 
 	if err == nil {
 		t.Errorf("Expected error when AvpType.Code = -1 on second AVP, but got no error")
@@ -358,7 +358,7 @@ AvpTypes:
       Type: "OctetString"
 `
 
-	dictionary, err = diameter.DictionaryFromYamlString(InvalidDefinition)
+	_, err = diameter.DictionaryFromYamlString(InvalidDefinition)
 
 	if err == nil {
 		t.Errorf("Expected error when Enumveration.Value is a string on second AVP, but got no error")
